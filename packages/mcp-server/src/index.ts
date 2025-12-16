@@ -14,6 +14,7 @@ import {
   openTab,
   closeTab,
   callPageTool,
+  discoverToolsForTab,
 } from "./extension-client.js";
 
 const server = new Server(
@@ -88,6 +89,17 @@ async function handleBrowserAction(
       if (!state.connected) {
         throw new Error("Not connected. Use action: 'connect' first.");
       }
+      // Discover tools for all tabs in parallel
+      const tabIds = Array.from(state.tabs.keys());
+      await Promise.all(
+        tabIds.map((tabId) =>
+          discoverToolsForTab(tabId).catch((err) => {
+            console.error(`Failed to discover tools for tab ${tabId}:`, err.message);
+            return [];
+          })
+        )
+      );
+      // Return tabs with freshly discovered tools
       const tabs = Array.from(state.tabs.values()).map((tab) => ({
         id: tab.id,
         title: tab.title,

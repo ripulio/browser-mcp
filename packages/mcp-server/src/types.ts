@@ -17,15 +17,18 @@ export interface BrowserState {
 export type ExtensionMessage =
   | { type: "connected"; browser: { name: string; version: string }; tabs: TabInfo[] }
   | { type: "disconnected" }
-  | { type: "tabCreated"; tab: TabInfo }
+  | { type: "tabCreated"; tab: TabInfo; requestId?: string }
   | { type: "tabUpdated"; tab: TabInfo }
   | { type: "tabClosed"; tabId: number }
   | { type: "toolsChanged"; tabId: number; tools: Tool[] }
-  | { type: "toolResult"; callId: string; result: unknown; error?: string };
+  | { type: "toolResult"; callId: string; result: unknown; error?: string }
+  | { type: "toolsDiscovered"; callId: string; tabId: number; tools: Tool[] }
+  | { type: "tabFocused"; tabId: number; tools: Tool[]; requestId?: string };
 
 // Messages from MCP server to extension
 export type ServerMessage =
   | { type: "connect"; launch?: boolean }
-  | { type: "openTab"; url: string }
+  | { type: "openTab"; url: string; focus: boolean; requestId?: string }
   | { type: "closeTab"; tabId: number }
-  | { type: "callTool"; callId: string; tabId: number; toolName: string; args: Record<string, unknown> };
+  | { type: "callTool"; callId: string; tabId: number; toolName: string; args: Record<string, unknown> }
+  | { type: "discoverTools"; callId: string; tabId: number };

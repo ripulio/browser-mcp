@@ -83,7 +83,7 @@ async function handleServerMessage(message: ServerMessage): Promise<void> {
       break;
 
     case "openTab":
-      await handleOpenTab(message.url, message.focus);
+      await handleOpenTab(message.url, message.focus, message.requestId);
       break;
 
     case "focusTab":
@@ -96,6 +96,10 @@ async function handleServerMessage(message: ServerMessage): Promise<void> {
 
     case "callTool":
       await handleCallTool(message.callId, message.tabId, message.toolName, message.args);
+      break;
+
+    case "discoverTools":
+      await handleDiscoverTools(message.callId, message.tabId);
       break;
   }
 }
@@ -127,7 +131,7 @@ async function handleConnect(): Promise<void> {
 /**
  * Handle open tab request
  */
-async function handleOpenTab(url: string, focus: boolean): Promise<void> {
+async function handleOpenTab(url: string, focus: boolean, requestId?: string): Promise<void> {
   const tab = await chrome.tabs.create({ url, active: focus });
 
   if (focus && tab.id) {
@@ -135,7 +139,7 @@ async function handleOpenTab(url: string, focus: boolean): Promise<void> {
     chrome.tabs.onUpdated.addListener(function listener(tabId, changeInfo) {
       if (tabId === tab.id && changeInfo.status === "complete") {
         chrome.tabs.onUpdated.removeListener(listener);
-        sendTabFocused(tab.id!);
+        sendTabFocused(tab.id!, requestId);
       }
     });
   } else {
@@ -147,6 +151,7 @@ async function handleOpenTab(url: string, focus: boolean): Promise<void> {
         url: tab.url || url,
         tools: [],
       },
+      requestId,
     });
   }
 }
@@ -172,7 +177,20 @@ async function handleCloseTab(tabId: number): Promise<void> {
 }
 
 /**
- * Handle tool call request
+ * Handle discover tools request - discover tools for a specific tab without focusing
+ */
+async function handleDiscoverTools(callId: string, tabId: number): Promise<void> {
+  const tools = await discoverTools(tabId);
+  send({
+    type: "toolsDiscovered",
+    callId,
+    tabId,
+    tools,
+  });
+}
+
+/**
+ * Handle tool call request by executing via navigator.modelContext
  */
 async function handleCallTool(
   callId: string,
@@ -180,15 +198,61 @@ async function handleCallTool(
   toolName: string,
   args: Record<string, unknown>
 ): Promise<void> {
+  console.log(`[BrowserMCP] Calling tool "${toolName}" on tab ${tabId} with args:`, args);
+
   try {
-    // For now, just return an error - tool execution will be implemented later
-    send({
-      type: "toolResult",
-      callId,
-      result: null,
-      error: `Tool execution not yet implemented: ${toolName}`,
+    const code = `
+      (async () => {
+        const toolName = ${JSON.stringify(toolName)};
+        const toolArgs = ${JSON.stringify(args)};
+
+        console.log('[BrowserMCP Page] Executing tool:', toolName, 'with args:', toolArgs);
+
+        if (!navigator.modelContext || !navigator.modelContext.executeTool) {
+          console.error('[BrowserMCP Page] navigator.modelContext not available');
+          return { error: "navigator.modelContext not available" };
+        }
+        try {
+          console.log('[BrowserMCP Page] Calling navigator.modelContext.executeTool...');
+          const result = await navigator.modelContext.executeTool(toolName, toolArgs);
+          console.log('[BrowserMCP Page] Tool result:', result);
+          return { result };
+        } catch (e) {
+          console.error('[BrowserMCP Page] Tool execution error:', e);
+          return { error: e instanceof Error ? e.message : String(e) };
+        }
+      })();
+    `;
+
+    console.log(`[BrowserMCP] Executing userScript on tab ${tabId}...`);
+    const results = await chrome.userScripts.execute({
+      target: { tabId },
+      world: "MAIN",
+      js: [{ code }],
     });
+    console.log(`[BrowserMCP] userScript execution results:`, results);
+
+    const response = results?.[0]?.result as { result?: unknown; error?: string } | undefined;
+    console.log(`[BrowserMCP] Parsed response:`, response);
+
+    if (response?.error) {
+      console.error(`[BrowserMCP] Tool error:`, response.error);
+      send({
+        type: "toolResult",
+        callId,
+        result: null,
+        error: response.error,
+      });
+    } else {
+      console.log(`[BrowserMCP] Tool success, sending result:`, response?.result);
+      send({
+        type: "toolResult",
+        callId,
+        result: response?.result ?? null,
+      });
+    }
   } catch (error) {
+    console.error(`[BrowserMCP] Tool call exception:`, error);
     send({
       type: "toolResult",
       callId,
@@ -201,7 +265,7 @@ async function handleCallTool(
 /**
  * Send tab focused message with discovered tools
  */
-async function sendTabFocused(tabId: number): Promise<void> {
+async function sendTabFocused(tabId: number, requestId?: string): Promise<void> {
   const tab = await chrome.tabs.get(tabId);
   const tools = await discoverTools(tabId);
 
@@ -209,17 +273,51 @@ async function sendTabFocused(tabId: number): Promise<void> {
     type: "tabFocused",
     tabId,
     tools,
+    requestId,
   });
 }
 
 /**
- * Discover available tools for the current page
- * This is a placeholder - real implementation would analyze the DOM
+ * Discover available tools for the current page by querying navigator.modelContext
  */
 async function discoverTools(tabId: number): Promise<Tool[]> {
-  // For now, return empty tools
-  // Future: inject content script to analyze page and discover interactive elements
-  return [];
+  try {
+    // Get tab info to check URL
+    const tab = await chrome.tabs.get(tabId);
+
+    // Skip restricted URLs that we can't inject into
+    if (!tab.url ||
+        tab.url.startsWith("chrome://") ||
+        tab.url.startsWith("chrome-extension://") ||
+        tab.url.startsWith("about:") ||
+        tab.url.startsWith("edge://") ||
+        tab.url.startsWith("devtools://")) {
+      return [];
+    }
+
+    const code = `
+      (() => {
+        if (!navigator.modelContext || !navigator.modelContext.list) {
+          return [];
+        }
+        return [...navigator.modelContext.list()];
+      })();
+    `;
+
+    const results = await chrome.userScripts.execute({
+      target: { tabId },
+      world: "MAIN",
+      js: [{ code }],
+    });
+
+    if (results && results[0]?.result) {
+      return results[0].result as Tool[];
+    }
+    return [];
+  } catch (error) {
+    // Silently return empty for permission errors on restricted pages
+    return [];
+  }
 }
 
 // Listen for tab events to keep MCP server in sync
