@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "browser": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "/Users/eoghan/repos/browser-mcp/packages/mcp-server/dist/index.js"
+      ],
+      "env": {}
+    }
+  }
+}

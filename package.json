@@ -1,0 +1,13 @@
+{
+  "name": "browser-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "build:server": "npm run build -w @browser-mcp/server",
+    "build:extension": "npm run build -w @browser-mcp/extension"
+  }
+}
