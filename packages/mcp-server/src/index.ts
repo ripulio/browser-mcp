@@ -7,12 +7,11 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { getTools } from "./tools.js";
-import { getState, clearFocus } from "./state.js";
+import { getState } from "./state.js";
 import {
   connectToExtension,
   startServer,
   openTab,
-  focusTab,
   closeTab,
   callPageTool,
 } from "./extension-client.js";
@@ -38,8 +37,25 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
+  if (name !== "browser") {
+    return {
+      content: [{ type: "text", text: `Error: Unknown tool: ${name}` }],
+      isError: true,
+    };
+  }
+
+  const params = (args as Record<string, unknown>) ?? {};
+  const action = params.action as string;
+
+  if (!action) {
+    return {
+      content: [{ type: "text", text: "Error: action parameter is required" }],
+      isError: true,
+    };
+  }
+
   try {
-    const result = await handleTool(name, args as Record<string, unknown> ?? {});
+    const result = await handleBrowserAction(action, params);
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
     };
@@ -52,14 +68,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-async function handleTool(
-  name: string,
-  args: Record<string, unknown>
+async function handleBrowserAction(
+  action: string,
+  params: Record<string, unknown>
 ): Promise<unknown> {
   const state = getState();
 
-  switch (name) {
-    case "connect_browser": {
+  switch (action) {
+    case "connect": {
       const result = await connectToExtension();
       return {
         connected: true,
@@ -70,83 +86,66 @@ async function handleTool(
 
     case "list_tabs": {
       if (!state.connected) {
-        throw new Error("Not connected. Call connect_browser first.");
+        throw new Error("Not connected. Use action: 'connect' first.");
       }
       const tabs = Array.from(state.tabs.values()).map((tab) => ({
         id: tab.id,
         title: tab.title,
         url: tab.url,
-        focused: tab.id === state.focusedTabId,
-        toolCount: tab.tools.length,
+        tools: tab.tools.map((t) => t.name),
       }));
-      return { tabs, focusedTabId: state.focusedTabId };
+      return { tabs };
     }
 
     case "open_tab": {
       if (!state.connected) {
-        throw new Error("Not connected. Call connect_browser first.");
+        throw new Error("Not connected. Use action: 'connect' first.");
       }
-      const url = args.url as string;
-      const focus = (args.focus as boolean) ?? true;
+      const url = params.url as string;
       if (!url) {
-        throw new Error("url is required");
+        throw new Error("url parameter is required for open_tab");
       }
-      const tab = await openTab(url, focus);
+      const tab = await openTab(url);
       return {
-        tab: { id: tab.id, title: tab.title, url: tab.url },
-        focused: focus,
-        toolsAvailable: focus ? tab.tools.map((t) => t.name) : [],
-      };
-    }
-
-    case "focus_tab": {
-      if (!state.connected) {
-        throw new Error("Not connected. Call connect_browser first.");
-      }
-      const tabId = args.tabId as number;
-      if (tabId === undefined) {
-        throw new Error("tabId is required");
-      }
-      if (!state.tabs.has(tabId)) {
-        throw new Error(`Tab ${tabId} not found`);
-      }
-      await focusTab(tabId);
-      const tab = state.tabs.get(tabId)!;
-      return {
-        success: true,
-        tab: { id: tab.id, title: tab.title, url: tab.url },
-        toolsAvailable: tab.tools.map((t) => t.name),
+        tab: {
+          id: tab.id,
+          title: tab.title,
+          url: tab.url,
+          tools: tab.tools.map((t) => t.name),
+        },
       };
     }
 
     case "close_tab": {
       if (!state.connected) {
-        throw new Error("Not connected. Call connect_browser first.");
+        throw new Error("Not connected. Use action: 'connect' first.");
       }
-      const tabId = (args.tabId as number) ?? state.focusedTabId;
-      if (tabId === null) {
-        throw new Error("No tab specified and no tab is focused");
+      const tabId = params.tabId as number;
+      if (tabId === undefined) {
+        throw new Error("tabId parameter is required for close_tab");
       }
       if (!state.tabs.has(tabId)) {
         throw new Error(`Tab ${tabId} not found`);
       }
-      const wasClosingFocusedTab = tabId === state.focusedTabId;
       await closeTab(tabId);
-      if (wasClosingFocusedTab) {
-        clearFocus();
-      }
       return { closed: true, tabId };
     }
 
     default: {
       // Assume it's a page-specific tool
       if (!state.connected) {
-        throw new Error("Not connected. Call connect_browser first.");
+        throw new Error("Not connected. Use action: 'connect' first.");
       }
-      if (state.focusedTabId === null) {
-        throw new Error("No tab is focused. Call focus_tab first.");
+      const tabId = params.tabId as number;
+      if (tabId === undefined) {
+        throw new Error("tabId parameter is required for page-specific tools");
       }
-      const result = await callPageTool(state.focusedTabId, name, args);
+      if (!state.tabs.has(tabId)) {
+        throw new Error(`Tab ${tabId} not found`);
+      }
+      // Pass all params except action and tabId to the page tool
+      const { action: _, tabId: __, ...toolArgs } = params;
+      const result = await callPageTool(tabId, action, toolArgs);
       return result;
     }
   }

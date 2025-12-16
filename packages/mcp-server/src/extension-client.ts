@@ -5,7 +5,6 @@ import {
   addTab,
   updateTab,
   removeTab,
-  setFocusedTab,
   updateTabTools,
 } from "./state.js";
 
@@ -19,6 +18,13 @@ let callIdCounter = 0;
 // Pending connect call waiting for extension
 let pendingConnect: {
   resolve: (result: { name: string; version: string; tabCount: number }) => void;
+  reject: (error: Error) => void;
+  timeout: NodeJS.Timeout;
+} | null = null;
+
+// Pending openTab call waiting for tabCreated
+let pendingOpenTab: {
+  resolve: (tab: TabInfo) => void;
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
 } | null = null;
@@ -97,6 +103,12 @@ function handleExtensionMessage(message: ExtensionMessage): void {
 
     case "tabCreated":
       addTab(message.tab);
+      // Resolve pending openTab call
+      if (pendingOpenTab) {
+        clearTimeout(pendingOpenTab.timeout);
+        pendingOpenTab.resolve(message.tab);
+        pendingOpenTab = null;
+      }
       break;
 
     case "tabUpdated":
@@ -105,10 +117,6 @@ function handleExtensionMessage(message: ExtensionMessage): void {
 
     case "tabClosed":
       removeTab(message.tabId);
-      break;
-
-    case "tabFocused":
-      setFocusedTab(message.tabId, message.tools);
       break;
 
     case "toolsChanged":
@@ -131,7 +139,7 @@ function handleExtensionMessage(message: ExtensionMessage): void {
 }
 
 /**
- * Called when connect_browser tool is invoked.
+ * Called when connect action is invoked.
  * Sends a connect message to the extension and waits for response.
  */
 export function connectToExtension(): Promise<{ name: string; version: string; tabCount: number }> {
@@ -163,66 +171,21 @@ export function isConnected(): boolean {
   return extensionSocket !== null && extensionSocket.readyState === WebSocket.OPEN;
 }
 
-export async function openTab(url: string, focus: boolean): Promise<TabInfo> {
+export async function openTab(url: string): Promise<TabInfo> {
   return new Promise((resolve, reject) => {
     if (!isConnected()) {
       reject(new Error("Not connected to browser"));
       return;
     }
 
-    const callId = `open_${++callIdCounter}`;
-    pendingCalls.set(callId, {
-      resolve: (result) => resolve(result as TabInfo),
-      reject,
-    });
-
-    send({ type: "openTab", url, focus });
-
-    // Listen for tabCreated or tabFocused response
-    const checkMessage = (msg: ExtensionMessage) => {
-      if (msg.type === "tabFocused" || msg.type === "tabCreated") {
-        const tab = msg.type === "tabFocused"
-          ? { id: msg.tabId, tools: msg.tools } as TabInfo
-          : msg.tab;
-        pendingCalls.delete(callId);
-        resolve(tab);
-        return true;
-      }
-      return false;
-    };
-
-    // Store original handler to intercept
-    const originalHandler = handleExtensionMessage;
-    const interceptHandler = (msg: ExtensionMessage) => {
-      if (!checkMessage(msg)) {
-        originalHandler(msg);
-      }
-    };
-
-    // Timeout
-    setTimeout(() => {
-      pendingCalls.delete(callId);
+    const timeout = setTimeout(() => {
+      pendingOpenTab = null;
       reject(new Error("Timeout waiting for tab to open"));
     }, 30000);
-  });
-}
 
-export async function focusTab(tabId: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (!isConnected()) {
-      reject(new Error("Not connected to browser"));
-      return;
-    }
+    pendingOpenTab = { resolve, reject, timeout };
 
-    send({ type: "focusTab", tabId });
-
-    const callId = `focus_${++callIdCounter}`;
-    pendingCalls.set(callId, { resolve: () => resolve(), reject });
-
-    setTimeout(() => {
-      pendingCalls.delete(callId);
-      reject(new Error("Timeout waiting for tab focus"));
-    }, 5000);
+    send({ type: "openTab", url });
   });
 }
 
