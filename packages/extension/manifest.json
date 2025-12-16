@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Browser MCP",
+  "name": "webMCP WebSocket Execution Broker",
   "version": "1.0.0",
-  "description": "Connect Chrome to Claude Code via MCP",
+  "description": "Connect Chrome to Claude Code via ws - use WebMCP tools in the browser.",
   "minimum_chrome_version": "116",
   "permissions": [
     "tabs",
