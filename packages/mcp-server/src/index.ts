@@ -3,7 +3,7 @@
  * Browser MCP Server - Entry Point
  *
  * This is the main entry point for the Browser MCP server. It exposes a single
- * "browser" tool that provides browser automation capabilities through the
+ * "executeTool" tool that proxies tool calls to web pages through the
  * Model Context Protocol (MCP).
  *
  * The server:
@@ -151,7 +151,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
-  if (name !== "browser") {
+  if (name !== "executeTool") {
     return {
       content: [{ type: "text", text: `Error: Unknown tool: ${name}` }],
       isError: true,
