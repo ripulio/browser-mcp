@@ -1,4 +1,22 @@
+/**
+ * Chrome Extension Background Service Worker
+ *
+ * This service worker manages WebSocket connections to MCP servers and
+ * bridges browser automation requests. Key responsibilities:
+ *
+ * - Server Discovery: Scans ports 8765-8785 for available MCP servers
+ * - Multi-Server Support: Maintains connections to ALL discovered servers
+ * - Message Routing: Routes requests to specific servers, broadcasts events
+ * - Tab Management: Opens, closes, focuses tabs on server request
+ * - Tool Discovery: Queries navigator.modelContext for page-exposed tools
+ * - Tool Execution: Executes page tools via userScripts API in MAIN world
+ *
+ * The extension connects to multiple MCP servers simultaneously, enabling
+ * multiple Claude instances to control the same browser.
+ */
+
 import { ExtensionMessage, ServerMessage, TabInfo, Tool } from "./types.js";
+import { ExtensionMessageType, ServerMessageType } from "./message-types.js";
 
 const WS_PORT_START = 8765;
 const WS_PORT_END = 8785;
@@ -81,7 +99,7 @@ function broadcast(message: ExtensionMessage): void {
 function startKeepalive(): void {
   stopKeepalive();
   keepaliveInterval = setInterval(() => {
-    broadcast({ type: "ping" });
+    broadcast({ type: ExtensionMessageType.PING });
   }, KEEPALIVE_INTERVAL);
 }
 
@@ -111,31 +129,31 @@ async function handleServerMessage(message: ServerMessage, sourcePort: number): 
   const sessionId = (message as { sessionId?: string }).sessionId;
 
   switch (message.type) {
-    case "pong":
+    case ServerMessageType.PONG:
       // Keepalive response, nothing to do
       break;
 
-    case "connect":
+    case ServerMessageType.CONNECT:
       await handleConnect(sourcePort, sessionId);
       break;
 
-    case "openTab":
+    case ServerMessageType.OPEN_TAB:
       await handleOpenTab(sourcePort, message.url, message.focus, message.requestId, sessionId);
       break;
 
-    case "focusTab":
+    case ServerMessageType.FOCUS_TAB:
       await handleFocusTab(sourcePort, message.tabId, sessionId);
       break;
 
-    case "closeTab":
+    case ServerMessageType.CLOSE_TAB:
       await handleCloseTab(sourcePort, message.tabId, sessionId);
       break;
 
-    case "callTool":
+    case ServerMessageType.CALL_TOOL:
       await handleCallTool(sourcePort, message.callId, message.tabId, message.toolName, message.args, sessionId);
       break;
 
-    case "discoverTools":
+    case ServerMessageType.DISCOVER_TOOLS:
       await handleDiscoverTools(sourcePort, message.callId, message.tabId, sessionId);
       break;
   }
@@ -156,7 +174,7 @@ async function handleConnect(sourcePort: number, sessionId?: string): Promise<vo
     }));
 
   sendToPort(sourcePort, {
-    type: "connected",
+    type: ExtensionMessageType.CONNECTED,
     sessionId,
     browser: {
       name: "Chrome",
@@ -182,7 +200,7 @@ async function handleOpenTab(sourcePort: number, url: string, focus: boolean, re
     });
   } else {
     sendToPort(sourcePort, {
-      type: "tabCreated",
+      type: ExtensionMessageType.TAB_CREATED,
       sessionId,
       tab: {
         id: tab.id!,
@@ -212,7 +230,7 @@ async function handleFocusTab(sourcePort: number, tabId: number, sessionId?: str
  */
 async function handleCloseTab(sourcePort: number, tabId: number, sessionId?: string): Promise<void> {
   await chrome.tabs.remove(tabId);
-  sendToPort(sourcePort, { type: "tabClosed", sessionId, tabId });
+  sendToPort(sourcePort, { type: ExtensionMessageType.TAB_CLOSED, sessionId, tabId });
 }
 
 /**
@@ -221,7 +239,7 @@ async function handleCloseTab(sourcePort: number, tabId: number, sessionId?: str
 async function handleDiscoverTools(sourcePort: number, callId: string, tabId: number, sessionId?: string): Promise<void> {
   const tools = await discoverTools(tabId);
   sendToPort(sourcePort, {
-    type: "toolsDiscovered",
+    type: ExtensionMessageType.TOOLS_DISCOVERED,
     sessionId,
     callId,
     tabId,
@@ -280,7 +298,7 @@ async function handleCallTool(
     if (response?.error) {
       console.error(`[BrowserMCP] Tool error:`, response.error);
       sendToPort(sourcePort, {
-        type: "toolResult",
+        type: ExtensionMessageType.TOOL_RESULT,
         sessionId,
         callId,
         result: null,
@@ -289,7 +307,7 @@ async function handleCallTool(
     } else {
       console.log(`[BrowserMCP] Tool success, sending result:`, response?.result);
       sendToPort(sourcePort, {
-        type: "toolResult",
+        type: ExtensionMessageType.TOOL_RESULT,
         sessionId,
         callId,
         result: response?.result ?? null,
@@ -298,7 +316,7 @@ async function handleCallTool(
   } catch (error) {
     console.error(`[BrowserMCP] Tool call exception:`, error);
     sendToPort(sourcePort, {
-      type: "toolResult",
+      type: ExtensionMessageType.TOOL_RESULT,
       sessionId,
       callId,
       result: null,
@@ -315,7 +333,7 @@ async function sendTabFocused(sourcePort: number, tabId: number, requestId?: str
   const tools = await discoverTools(tabId);
 
   sendToPort(sourcePort, {
-    type: "tabFocused",
+    type: ExtensionMessageType.TAB_FOCUSED,
     sessionId,
     tabId,
     tools,
@@ -371,7 +389,7 @@ async function discoverTools(tabId: number): Promise<Tool[]> {
 chrome.tabs.onCreated.addListener((tab) => {
   if (tab.id && connections.size > 0) {
     broadcast({
-      type: "tabCreated",
+      type: ExtensionMessageType.TAB_CREATED,
       tab: {
         id: tab.id,
         title: tab.title || "",
@@ -384,14 +402,14 @@ chrome.tabs.onCreated.addListener((tab) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (connections.size > 0) {
-    broadcast({ type: "tabClosed", tabId });
+    broadcast({ type: ExtensionMessageType.TAB_CLOSED, tabId });
   }
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (connections.size > 0 && (changeInfo.title || changeInfo.url)) {
     broadcast({
-      type: "tabUpdated",
+      type: ExtensionMessageType.TAB_UPDATED,
       tab: {
         id: tabId,
         title: tab.title || "",
