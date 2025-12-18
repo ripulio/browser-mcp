@@ -1,6 +1,8 @@
 import { BrowserState, TabInfo } from "./types.js";
 
-export function createInitialState(): BrowserState {
+// Shared browser state - all sessions see the same browser/tabs
+// (because there's only one browser with one set of tabs)
+function createInitialState(): BrowserState {
   return {
     connected: false,
     tabs: new Map(),
@@ -8,38 +10,43 @@ export function createInitialState(): BrowserState {
   };
 }
 
+// Singleton shared state
+const sharedState = createInitialState();
+
 export function getState(): BrowserState {
-  return state;
+  return sharedState;
 }
 
 export function setConnected(
   connected: boolean,
   browserInfo?: { name: string; version: string }
 ): void {
-  state.connected = connected;
-  state.browserInfo = browserInfo ?? null;
+  sharedState.connected = connected;
+  sharedState.browserInfo = browserInfo ?? null;
   if (!connected) {
-    state.tabs.clear();
+    sharedState.tabs.clear();
   }
 }
 
 export function addTab(tab: TabInfo): void {
-  state.tabs.set(tab.id, tab);
+  sharedState.tabs.set(tab.id, tab);
 }
 
 export function updateTab(tab: TabInfo): void {
-  state.tabs.set(tab.id, tab);
+  sharedState.tabs.set(tab.id, tab);
 }
 
 export function removeTab(tabId: number): void {
-  state.tabs.delete(tabId);
+  sharedState.tabs.delete(tabId);
 }
 
 export function updateTabTools(tabId: number, tools: import("@modelcontextprotocol/sdk/types.js").Tool[]): void {
-  const tab = state.tabs.get(tabId);
+  const tab = sharedState.tabs.get(tabId);
   if (tab) {
     tab.tools = tools;
   }
 }
 
-const state = createInitialState();
+export function isConnected(): boolean {
+  return sharedState.connected;
+}

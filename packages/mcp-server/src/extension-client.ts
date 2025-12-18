@@ -8,44 +8,119 @@ import {
   updateTabTools,
   getState,
 } from "./state.js";
+import {
+  getSession,
+  getOrCreateSession,
+  getAllSessions,
+  generateCallId,
+  extractSessionIdFromCallId,
+  Session,
+} from "./session.js";
+import { mkdirSync, writeFileSync, unlinkSync, existsSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 
-const WS_PORT = 8765;
+const WS_PORT_START = 8765;
+const WS_PORT_END = 8785; // Try up to 20 ports
+const DISCOVERY_DIR = join(tmpdir(), "browser-mcp");
 
 let wss: WebSocketServer | null = null;
 let extensionSocket: WebSocket | null = null;
-const pendingCalls = new Map<string, { resolve: (result: unknown) => void; reject: (error: Error) => void }>();
-let callIdCounter = 0;
+let activePort: number | null = null;
+let portFilePath: string | null = null;
 
-// Pending connect call waiting for extension
-let connectInProgress = false;
-let pendingConnect: {
-  resolve: (result: { name: string; version: string; tabCount: number }) => void;
-  reject: (error: Error) => void;
-  timeout: NodeJS.Timeout;
-} | null = null;
+// Default session ID for stdio transport (single client mode)
+export const DEFAULT_SESSION_ID = "default";
 
-// Pending openTab calls waiting for tabCreated/tabFocused
-const pendingOpenTabs = new Map<string, {
-  resolve: (tab: TabInfo) => void;
-  reject: (error: Error) => void;
-  timeout: NodeJS.Timeout;
-}>();
+/**
+ * Find an available port in the range
+ */
+async function findAvailablePort(): Promise<number> {
+  for (let port = WS_PORT_START; port <= WS_PORT_END; port++) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const testServer = new WebSocketServer({ port });
+        testServer.on("listening", () => {
+          testServer.close();
+          resolve();
+        });
+        testServer.on("error", reject);
+      });
+      return port;
+    } catch {
+      // Port in use, try next
+      continue;
+    }
+  }
+  throw new Error(`No available ports in range ${WS_PORT_START}-${WS_PORT_END}`);
+}
 
-// Pending closeTab calls waiting for tabClosed
-const pendingCloseTabs = new Map<number, {
-  resolve: () => void;
-  reject: (error: Error) => void;
-  timeout: NodeJS.Timeout;
-}>();
+/**
+ * Write server info to discovery directory
+ */
+function writeDiscoveryFile(port: number): void {
+  try {
+    // Ensure discovery directory exists
+    if (!existsSync(DISCOVERY_DIR)) {
+      mkdirSync(DISCOVERY_DIR, { recursive: true });
+    }
+
+    const pid = process.pid;
+    portFilePath = join(DISCOVERY_DIR, `server-${pid}.json`);
+
+    const info = {
+      port,
+      pid,
+      startedAt: Date.now(),
+    };
+
+    writeFileSync(portFilePath, JSON.stringify(info, null, 2));
+    console.error(`Discovery file written: ${portFilePath}`);
+  } catch (error) {
+    console.error("Failed to write discovery file:", error);
+  }
+}
+
+/**
+ * Remove discovery file on shutdown
+ */
+function removeDiscoveryFile(): void {
+  if (portFilePath && existsSync(portFilePath)) {
+    try {
+      unlinkSync(portFilePath);
+      console.error(`Discovery file removed: ${portFilePath}`);
+    } catch (error) {
+      console.error("Failed to remove discovery file:", error);
+    }
+  }
+}
+
+// Cleanup on process exit
+process.on("exit", removeDiscoveryFile);
+process.on("SIGINT", () => {
+  removeDiscoveryFile();
+  process.exit(0);
+});
+process.on("SIGTERM", () => {
+  removeDiscoveryFile();
+  process.exit(0);
+});
 
 /**
  * Start the WebSocket server. Called once when MCP server starts.
  */
-export function startServer(): void {
+export async function startServer(): Promise<void> {
   if (wss) return;
 
-  wss = new WebSocketServer({ port: WS_PORT });
-  console.error(`WebSocket server listening on ws://localhost:${WS_PORT}`);
+  // Find available port
+  activePort = await findAvailablePort();
+  console.error(`Found available port: ${activePort}`);
+
+  wss = new WebSocketServer({ port: activePort });
+  console.error(`WebSocket server listening on ws://localhost:${activePort}`);
+
+  // Write discovery file so extension can find us
+  writeDiscoveryFile(activePort);
 
   wss.on("connection", (socket) => {
     console.error("Extension connected");
@@ -60,7 +135,7 @@ export function startServer(): void {
     extensionSocket = socket;
 
     socket.on("message", (data) => {
-      let message: ExtensionMessage | { type: "ping" };
+      let message: ExtensionMessage;
       try {
         message = JSON.parse(data.toString());
       } catch (error) {
@@ -74,7 +149,7 @@ export function startServer(): void {
         return;
       }
 
-      handleExtensionMessage(message as ExtensionMessage);
+      handleExtensionMessage(message);
     });
 
     socket.on("close", () => {
@@ -82,32 +157,9 @@ export function startServer(): void {
       extensionSocket = null;
       setConnected(false);
 
-      // Clean up pending calls (timeouts will self-clean when they check the map)
-      for (const [id, pending] of pendingCalls) {
-        pending.reject(new Error("Connection closed"));
-      }
-      pendingCalls.clear();
-
-      // Clean up pending open tabs
-      for (const [id, pending] of pendingOpenTabs) {
-        clearTimeout(pending.timeout);
-        pending.reject(new Error("Connection closed"));
-      }
-      pendingOpenTabs.clear();
-
-      // Clean up pending close tabs
-      for (const [id, pending] of pendingCloseTabs) {
-        clearTimeout(pending.timeout);
-        pending.reject(new Error("Connection closed"));
-      }
-      pendingCloseTabs.clear();
-
-      // Clean up pending connect
-      if (pendingConnect) {
-        connectInProgress = false;
-        clearTimeout(pendingConnect.timeout);
-        pendingConnect.reject(new Error("Connection closed"));
-        pendingConnect = null;
+      // Reject all pending operations for all sessions
+      for (const session of getAllSessions()) {
+        rejectAllSessionPendingOps(session, "Connection closed");
       }
     });
 
@@ -121,25 +173,75 @@ export function startServer(): void {
   });
 }
 
+function rejectAllSessionPendingOps(session: Session, reason: string): void {
+  // Clean up pending calls
+  for (const [, pending] of session.pendingCalls) {
+    pending.reject(new Error(reason));
+  }
+  session.pendingCalls.clear();
+
+  // Clean up pending open tabs
+  for (const [, pending] of session.pendingOpenTabs) {
+    clearTimeout(pending.timeout);
+    pending.reject(new Error(reason));
+  }
+  session.pendingOpenTabs.clear();
+
+  // Clean up pending close tabs
+  for (const [, pending] of session.pendingCloseTabs) {
+    clearTimeout(pending.timeout);
+    pending.reject(new Error(reason));
+  }
+  session.pendingCloseTabs.clear();
+
+  // Clean up pending connect
+  if (session.pendingConnect) {
+    session.connectInProgress = false;
+    clearTimeout(session.pendingConnect.timeout);
+    session.pendingConnect.reject(new Error(reason));
+    session.pendingConnect = null;
+  }
+}
+
 function handleExtensionMessage(message: ExtensionMessage): void {
+  // Extract sessionId from message or callId
+  let sessionId = (message as { sessionId?: string }).sessionId;
+
+  // For messages with callId, extract sessionId from there
+  if (!sessionId && "callId" in message) {
+    sessionId = extractSessionIdFromCallId(message.callId) ?? DEFAULT_SESSION_ID;
+  }
+
+  // For messages with requestId, extract sessionId from there
+  if (!sessionId && "requestId" in message && message.requestId) {
+    sessionId = extractSessionIdFromCallId(message.requestId) ?? DEFAULT_SESSION_ID;
+  }
+
+  // Default to default session if no sessionId found
+  if (!sessionId) {
+    sessionId = DEFAULT_SESSION_ID;
+  }
+
   switch (message.type) {
-    case "connected":
+    case "connected": {
       setConnected(true, message.browser);
       for (const tab of message.tabs) {
         addTab(tab);
       }
-      // Resolve pending connect call
-      if (pendingConnect) {
-        connectInProgress = false;
-        clearTimeout(pendingConnect.timeout);
-        pendingConnect.resolve({
+      // Resolve pending connect call for this session
+      const session = getSession(sessionId);
+      if (session?.pendingConnect) {
+        session.connectInProgress = false;
+        clearTimeout(session.pendingConnect.timeout);
+        session.pendingConnect.resolve({
           name: message.browser.name,
           version: message.browser.version,
           tabCount: message.tabs.length,
         });
-        pendingConnect = null;
+        session.pendingConnect = null;
       }
       break;
+    }
 
     case "disconnected":
       setConnected(false);
@@ -149,11 +251,15 @@ function handleExtensionMessage(message: ExtensionMessage): void {
       addTab(message.tab);
       // Resolve pending openTab call if requestId matches
       if (message.requestId) {
-        const pending = pendingOpenTabs.get(message.requestId);
-        if (pending) {
-          clearTimeout(pending.timeout);
-          pendingOpenTabs.delete(message.requestId);
-          pending.resolve(message.tab);
+        const reqSessionId = extractSessionIdFromCallId(message.requestId) ?? sessionId;
+        const session = getSession(reqSessionId);
+        if (session) {
+          const pending = session.pendingOpenTabs.get(message.requestId);
+          if (pending) {
+            clearTimeout(pending.timeout);
+            session.pendingOpenTabs.delete(message.requestId);
+            pending.resolve(message.tab);
+          }
         }
       }
       break;
@@ -165,11 +271,15 @@ function handleExtensionMessage(message: ExtensionMessage): void {
 
     case "tabClosed": {
       removeTab(message.tabId);
-      const pending = pendingCloseTabs.get(message.tabId);
-      if (pending) {
-        clearTimeout(pending.timeout);
-        pendingCloseTabs.delete(message.tabId);
-        pending.resolve();
+      // Check all sessions for pending close operation
+      for (const session of getAllSessions()) {
+        const pending = session.pendingCloseTabs.get(message.tabId);
+        if (pending) {
+          clearTimeout(pending.timeout);
+          session.pendingCloseTabs.delete(message.tabId);
+          pending.resolve(undefined);
+          break; // Only one session should be waiting for this close
+        }
       }
       break;
     }
@@ -182,13 +292,17 @@ function handleExtensionMessage(message: ExtensionMessage): void {
       updateTabTools(message.tabId, message.tools);
       // Resolve pending openTab if requestId matches
       if (message.requestId) {
-        const pending = pendingOpenTabs.get(message.requestId);
-        if (pending) {
-          const tab = getState().tabs.get(message.tabId);
-          if (tab) {
-            clearTimeout(pending.timeout);
-            pendingOpenTabs.delete(message.requestId);
-            pending.resolve(tab);
+        const reqSessionId = extractSessionIdFromCallId(message.requestId) ?? sessionId;
+        const session = getSession(reqSessionId);
+        if (session) {
+          const pending = session.pendingOpenTabs.get(message.requestId);
+          if (pending) {
+            const tab = getState().tabs.get(message.tabId);
+            if (tab) {
+              clearTimeout(pending.timeout);
+              session.pendingOpenTabs.delete(message.requestId);
+              pending.resolve(tab);
+            }
           }
         }
       }
@@ -196,23 +310,31 @@ function handleExtensionMessage(message: ExtensionMessage): void {
     }
 
     case "toolsDiscovered": {
-      const pending = pendingCalls.get(message.callId);
-      if (pending) {
-        pendingCalls.delete(message.callId);
-        updateTabTools(message.tabId, message.tools);
-        pending.resolve(message.tools);
+      const discoverSessionId = extractSessionIdFromCallId(message.callId) ?? sessionId;
+      const session = getSession(discoverSessionId);
+      if (session) {
+        const pending = session.pendingCalls.get(message.callId);
+        if (pending) {
+          session.pendingCalls.delete(message.callId);
+          updateTabTools(message.tabId, message.tools);
+          pending.resolve(message.tools);
+        }
       }
       break;
     }
 
     case "toolResult": {
-      const pending = pendingCalls.get(message.callId);
-      if (pending) {
-        pendingCalls.delete(message.callId);
-        if (message.error) {
-          pending.reject(new Error(message.error));
-        } else {
-          pending.resolve(message.result);
+      const resultSessionId = extractSessionIdFromCallId(message.callId) ?? sessionId;
+      const session = getSession(resultSessionId);
+      if (session) {
+        const pending = session.pendingCalls.get(message.callId);
+        if (pending) {
+          session.pendingCalls.delete(message.callId);
+          if (message.error) {
+            pending.reject(new Error(message.error));
+          } else {
+            pending.resolve(message.result);
+          }
         }
       }
       break;
@@ -224,9 +346,13 @@ function handleExtensionMessage(message: ExtensionMessage): void {
  * Called when connect action is invoked.
  * Sends a connect message to the extension and waits for response.
  */
-export function connectToExtension(): Promise<{ name: string; version: string; tabCount: number }> {
+export function connectToExtension(
+  sessionId: string = DEFAULT_SESSION_ID
+): Promise<{ name: string; version: string; tabCount: number }> {
   return new Promise((resolve, reject) => {
-    if (connectInProgress) {
+    const session = getOrCreateSession(sessionId);
+
+    if (session.connectInProgress) {
       reject(new Error("Connection already in progress"));
       return;
     }
@@ -236,17 +362,17 @@ export function connectToExtension(): Promise<{ name: string; version: string; t
       return;
     }
 
-    connectInProgress = true;
+    session.connectInProgress = true;
 
     const timeout = setTimeout(() => {
-      connectInProgress = false;
-      pendingConnect = null;
+      session.connectInProgress = false;
+      session.pendingConnect = null;
       reject(new Error("Connection timeout - extension did not respond"));
     }, 5000);
 
-    pendingConnect = { resolve, reject, timeout };
+    session.pendingConnect = { resolve, reject, timeout };
 
-    send({ type: "connect" });
+    send({ type: "connect", sessionId });
   });
 }
 
@@ -261,54 +387,68 @@ export function isConnected(): boolean {
   return extensionSocket !== null && extensionSocket.readyState === WebSocket.OPEN;
 }
 
-export async function openTab(url: string): Promise<TabInfo> {
+export function getActivePort(): number | null {
+  return activePort;
+}
+
+export async function openTab(
+  url: string,
+  sessionId: string = DEFAULT_SESSION_ID
+): Promise<TabInfo> {
   return new Promise((resolve, reject) => {
     if (!isConnected()) {
       reject(new Error("Not connected to browser"));
       return;
     }
 
-    const requestId = `open_${++callIdCounter}`;
+    const session = getOrCreateSession(sessionId);
+    const requestId = generateCallId(session, "open");
 
     const timeout = setTimeout(() => {
-      pendingOpenTabs.delete(requestId);
+      session.pendingOpenTabs.delete(requestId);
       reject(new Error("Timeout waiting for tab to open"));
     }, 30000);
 
-    pendingOpenTabs.set(requestId, { resolve, reject, timeout });
+    session.pendingOpenTabs.set(requestId, { resolve, reject, timeout });
 
     // Always focus so we wait for page load and get tools
-    send({ type: "openTab", url, focus: true, requestId });
+    send({ type: "openTab", sessionId, url, focus: true, requestId });
   });
 }
 
-export async function closeTab(tabId: number): Promise<void> {
+export async function closeTab(
+  tabId: number,
+  sessionId: string = DEFAULT_SESSION_ID
+): Promise<void> {
   return new Promise((resolve, reject) => {
     if (!isConnected()) {
       reject(new Error("Not connected to browser"));
       return;
     }
 
-    // Reject if already closing this tab
-    if (pendingCloseTabs.has(tabId)) {
+    const session = getOrCreateSession(sessionId);
+
+    // Reject if already closing this tab (within this session)
+    if (session.pendingCloseTabs.has(tabId)) {
       reject(new Error(`Already closing tab ${tabId}`));
       return;
     }
 
     const timeout = setTimeout(() => {
-      pendingCloseTabs.delete(tabId);
+      session.pendingCloseTabs.delete(tabId);
       reject(new Error("Timeout waiting for tab close"));
     }, 5000);
 
-    pendingCloseTabs.set(tabId, { resolve, reject, timeout });
-    send({ type: "closeTab", tabId });
+    session.pendingCloseTabs.set(tabId, { resolve, reject, timeout });
+    send({ type: "closeTab", sessionId, tabId });
   });
 }
 
 export async function callPageTool(
   tabId: number,
   toolName: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  sessionId: string = DEFAULT_SESSION_ID
 ): Promise<unknown> {
   return new Promise((resolve, reject) => {
     if (!isConnected()) {
@@ -316,35 +456,40 @@ export async function callPageTool(
       return;
     }
 
-    const callId = `call_${++callIdCounter}`;
-    pendingCalls.set(callId, { resolve, reject });
+    const session = getOrCreateSession(sessionId);
+    const callId = generateCallId(session, "call");
+    session.pendingCalls.set(callId, { resolve, reject });
 
-    send({ type: "callTool", callId, tabId, toolName, args });
+    send({ type: "callTool", sessionId, callId, tabId, toolName, args });
 
     setTimeout(() => {
-      if (pendingCalls.has(callId)) {
-        pendingCalls.delete(callId);
+      if (session.pendingCalls.has(callId)) {
+        session.pendingCalls.delete(callId);
         reject(new Error("Timeout waiting for tool result"));
       }
     }, 30000);
   });
 }
 
-export async function discoverToolsForTab(tabId: number): Promise<unknown> {
+export async function discoverToolsForTab(
+  tabId: number,
+  sessionId: string = DEFAULT_SESSION_ID
+): Promise<unknown> {
   return new Promise((resolve, reject) => {
     if (!isConnected()) {
       reject(new Error("Not connected to browser"));
       return;
     }
 
-    const callId = `discover_${++callIdCounter}`;
-    pendingCalls.set(callId, { resolve, reject });
+    const session = getOrCreateSession(sessionId);
+    const callId = generateCallId(session, "discover");
+    session.pendingCalls.set(callId, { resolve, reject });
 
-    send({ type: "discoverTools", callId, tabId });
+    send({ type: "discoverTools", sessionId, callId, tabId });
 
     setTimeout(() => {
-      if (pendingCalls.has(callId)) {
-        pendingCalls.delete(callId);
+      if (session.pendingCalls.has(callId)) {
+        session.pendingCalls.delete(callId);
         reject(new Error("Timeout waiting for tool discovery"));
       }
     }, 10000);

@@ -15,20 +15,25 @@ export interface BrowserState {
 
 // Messages from extension to MCP server
 export type ExtensionMessage =
-  | { type: "connected"; browser: { name: string; version: string }; tabs: TabInfo[] }
-  | { type: "disconnected" }
-  | { type: "tabCreated"; tab: TabInfo; requestId?: string }
-  | { type: "tabUpdated"; tab: TabInfo }
-  | { type: "tabClosed"; tabId: number }
-  | { type: "toolsChanged"; tabId: number; tools: Tool[] }
-  | { type: "toolResult"; callId: string; result: unknown; error?: string }
-  | { type: "toolsDiscovered"; callId: string; tabId: number; tools: Tool[] }
-  | { type: "tabFocused"; tabId: number; tools: Tool[]; requestId?: string };
+  | { type: "connected"; sessionId?: string; browser: { name: string; version: string }; tabs: TabInfo[] }
+  | { type: "disconnected"; sessionId?: string }
+  | { type: "tabCreated"; sessionId?: string; tab: TabInfo; requestId?: string }
+  | { type: "tabUpdated"; sessionId?: string; tab: TabInfo }
+  | { type: "tabClosed"; sessionId?: string; tabId: number }
+  | { type: "toolsChanged"; sessionId?: string; tabId: number; tools: Tool[] }
+  | { type: "toolResult"; sessionId?: string; callId: string; result: unknown; error?: string }
+  | { type: "toolsDiscovered"; sessionId?: string; callId: string; tabId: number; tools: Tool[] }
+  | { type: "tabFocused"; sessionId?: string; tabId: number; tools: Tool[]; requestId?: string }
+  | { type: "ping" }
+  | { type: "pong" };
 
 // Messages from MCP server to extension
 export type ServerMessage =
-  | { type: "connect"; launch?: boolean }
-  | { type: "openTab"; url: string; focus: boolean; requestId?: string }
-  | { type: "closeTab"; tabId: number }
-  | { type: "callTool"; callId: string; tabId: number; toolName: string; args: Record<string, unknown> }
-  | { type: "discoverTools"; callId: string; tabId: number };
+  | { type: "connect"; sessionId?: string; launch?: boolean }
+  | { type: "openTab"; sessionId?: string; url: string; focus: boolean; requestId?: string }
+  | { type: "closeTab"; sessionId?: string; tabId: number }
+  | { type: "callTool"; sessionId?: string; callId: string; tabId: number; toolName: string; args: Record<string, unknown> }
+  | { type: "discoverTools"; sessionId?: string; callId: string; tabId: number }
+  | { type: "pong" };
+
+  

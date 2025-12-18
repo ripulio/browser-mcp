@@ -1,55 +1,78 @@
 import { ExtensionMessage, ServerMessage, TabInfo, Tool } from "./types.js";
 
-const WS_URL = "ws://localhost:8765";
+const WS_PORT_START = 8765;
+const WS_PORT_END = 8785;
 const KEEPALIVE_INTERVAL = 20 * 1000; // 20 seconds
+const DISCOVERY_INTERVAL = 5 * 1000; // Check for new servers every 5 seconds
 
-let ws: WebSocket | null = null;
+// Map of port -> WebSocket connection
+const connections = new Map<number, WebSocket>();
 let keepaliveInterval: ReturnType<typeof setInterval> | null = null;
+let discoveryInterval: ReturnType<typeof setInterval> | null = null;
 
 /**
- * Connect to the MCP server's WebSocket
+ * Try to connect to a server on a specific port
  */
-function connect(): void {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    console.log("[BrowserMCP] Already connected");
-    return;
+function connectToPort(port: number): void {
+  if (connections.has(port)) {
+    return; // Already connected or connecting
   }
 
-  console.log(`[BrowserMCP] Connecting to ${WS_URL}...`);
-  ws = new WebSocket(WS_URL);
+  const ws = new WebSocket(`ws://localhost:${port}`);
 
   ws.onopen = () => {
-    console.log("[BrowserMCP] Connected to MCP server");
-    startKeepalive();
+    console.log(`[BrowserMCP] Connected to MCP server on port ${port}`);
+    connections.set(port, ws);
   };
 
   ws.onmessage = (event) => {
     const message = JSON.parse(event.data) as ServerMessage;
-    handleServerMessage(message);
+    handleServerMessage(message, port);
   };
 
   ws.onclose = () => {
-    console.log("[BrowserMCP] Disconnected from MCP server");
-    stopKeepalive();
-    ws = null;
-    // Attempt to reconnect after a delay
-    setTimeout(connect, 5000);
+    console.log(`[BrowserMCP] Disconnected from MCP server on port ${port}`);
+    connections.delete(port);
   };
 
-  ws.onerror = (error) => {
-    console.error("[BrowserMCP] WebSocket error:", error);
+  ws.onerror = () => {
+    // Silently ignore - server not available on this port
+    connections.delete(port);
   };
 }
 
 /**
- * Send a message to the MCP server
+ * Scan for available servers on all ports in range
  */
-function send(message: ExtensionMessage): void {
+function discoverServers(): void {
+  for (let port = WS_PORT_START; port <= WS_PORT_END; port++) {
+    if (!connections.has(port)) {
+      connectToPort(port);
+    }
+  }
+}
+
+/**
+ * Send a message to a specific server
+ */
+function sendToPort(port: number, message: ExtensionMessage): void {
+  const ws = connections.get(port);
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    console.error("[BrowserMCP] Cannot send - not connected");
+    console.error(`[BrowserMCP] Cannot send to port ${port} - not connected`);
     return;
   }
   ws.send(JSON.stringify(message));
+}
+
+/**
+ * Send a message to all connected servers (for broadcasts like tab events)
+ */
+function broadcast(message: ExtensionMessage): void {
+  for (const [port, ws] of connections) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(message));
+    }
+  }
 }
 
 /**
@@ -58,7 +81,7 @@ function send(message: ExtensionMessage): void {
 function startKeepalive(): void {
   stopKeepalive();
   keepaliveInterval = setInterval(() => {
-    send({ type: "ping" });
+    broadcast({ type: "ping" });
   }, KEEPALIVE_INTERVAL);
 }
 
@@ -70,36 +93,50 @@ function stopKeepalive(): void {
 }
 
 /**
- * Handle messages from the MCP server
+ * Start periodic server discovery
  */
-async function handleServerMessage(message: ServerMessage): Promise<void> {
+function startDiscovery(): void {
+  // Initial discovery
+  discoverServers();
+
+  // Periodic discovery for new servers
+  discoveryInterval = setInterval(discoverServers, DISCOVERY_INTERVAL);
+}
+
+/**
+ * Handle messages from an MCP server
+ */
+async function handleServerMessage(message: ServerMessage, sourcePort: number): Promise<void> {
+  // Extract sessionId from message for passing through responses
+  const sessionId = (message as { sessionId?: string }).sessionId;
+
   switch (message.type) {
     case "pong":
       // Keepalive response, nothing to do
       break;
 
     case "connect":
-      await handleConnect();
+      await handleConnect(sourcePort, sessionId);
       break;
 
     case "openTab":
-      await handleOpenTab(message.url, message.focus, message.requestId);
+      await handleOpenTab(sourcePort, message.url, message.focus, message.requestId, sessionId);
       break;
 
     case "focusTab":
-      await handleFocusTab(message.tabId);
+      await handleFocusTab(sourcePort, message.tabId, sessionId);
       break;
 
     case "closeTab":
-      await handleCloseTab(message.tabId);
+      await handleCloseTab(sourcePort, message.tabId, sessionId);
       break;
 
     case "callTool":
-      await handleCallTool(message.callId, message.tabId, message.toolName, message.args);
+      await handleCallTool(sourcePort, message.callId, message.tabId, message.toolName, message.args, sessionId);
       break;
 
     case "discoverTools":
-      await handleDiscoverTools(message.callId, message.tabId);
+      await handleDiscoverTools(sourcePort, message.callId, message.tabId, sessionId);
       break;
   }
 }
@@ -107,7 +144,7 @@ async function handleServerMessage(message: ServerMessage): Promise<void> {
 /**
  * Handle connect request - send browser info and current tabs
  */
-async function handleConnect(): Promise<void> {
+async function handleConnect(sourcePort: number, sessionId?: string): Promise<void> {
   const tabs = await chrome.tabs.query({});
   const tabInfos: TabInfo[] = tabs
     .filter((tab) => tab.id !== undefined)
@@ -118,8 +155,9 @@ async function handleConnect(): Promise<void> {
       tools: [], // Tools are only populated when focused
     }));
 
-  send({
+  sendToPort(sourcePort, {
     type: "connected",
+    sessionId,
     browser: {
       name: "Chrome",
       version: navigator.userAgent.match(/Chrome\/(\d+\.\d+\.\d+\.\d+)/)?.[1] || "unknown",
@@ -131,7 +169,7 @@ async function handleConnect(): Promise<void> {
 /**
  * Handle open tab request
  */
-async function handleOpenTab(url: string, focus: boolean, requestId?: string): Promise<void> {
+async function handleOpenTab(sourcePort: number, url: string, focus: boolean, requestId?: string, sessionId?: string): Promise<void> {
   const tab = await chrome.tabs.create({ url, active: focus });
 
   if (focus && tab.id) {
@@ -139,12 +177,13 @@ async function handleOpenTab(url: string, focus: boolean, requestId?: string): P
     chrome.tabs.onUpdated.addListener(function listener(tabId, changeInfo) {
       if (tabId === tab.id && changeInfo.status === "complete") {
         chrome.tabs.onUpdated.removeListener(listener);
-        sendTabFocused(tab.id!, requestId);
+        sendTabFocused(sourcePort, tab.id!, requestId, sessionId);
       }
     });
   } else {
-    send({
+    sendToPort(sourcePort, {
       type: "tabCreated",
+      sessionId,
       tab: {
         id: tab.id!,
         title: tab.title || "",
@@ -159,30 +198,31 @@ async function handleOpenTab(url: string, focus: boolean, requestId?: string): P
 /**
  * Handle focus tab request
  */
-async function handleFocusTab(tabId: number): Promise<void> {
+async function handleFocusTab(sourcePort: number, tabId: number, sessionId?: string): Promise<void> {
   await chrome.tabs.update(tabId, { active: true });
   const tab = await chrome.tabs.get(tabId);
   if (tab.windowId) {
     await chrome.windows.update(tab.windowId, { focused: true });
   }
-  await sendTabFocused(tabId);
+  await sendTabFocused(sourcePort, tabId, undefined, sessionId);
 }
 
 /**
  * Handle close tab request
  */
-async function handleCloseTab(tabId: number): Promise<void> {
+async function handleCloseTab(sourcePort: number, tabId: number, sessionId?: string): Promise<void> {
   await chrome.tabs.remove(tabId);
-  send({ type: "tabClosed", tabId });
+  sendToPort(sourcePort, { type: "tabClosed", sessionId, tabId });
 }
 
 /**
  * Handle discover tools request - discover tools for a specific tab without focusing
  */
-async function handleDiscoverTools(callId: string, tabId: number): Promise<void> {
+async function handleDiscoverTools(sourcePort: number, callId: string, tabId: number, sessionId?: string): Promise<void> {
   const tools = await discoverTools(tabId);
-  send({
+  sendToPort(sourcePort, {
     type: "toolsDiscovered",
+    sessionId,
     callId,
     tabId,
     tools,
@@ -193,10 +233,12 @@ async function handleDiscoverTools(callId: string, tabId: number): Promise<void>
  * Handle tool call request by executing via navigator.modelContext
  */
 async function handleCallTool(
+  sourcePort: number,
   callId: string,
   tabId: number,
   toolName: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  sessionId?: string
 ): Promise<void> {
   console.log(`[BrowserMCP] Calling tool "${toolName}" on tab ${tabId} with args:`, args);
 
@@ -237,24 +279,27 @@ async function handleCallTool(
 
     if (response?.error) {
       console.error(`[BrowserMCP] Tool error:`, response.error);
-      send({
+      sendToPort(sourcePort, {
         type: "toolResult",
+        sessionId,
         callId,
         result: null,
         error: response.error,
       });
     } else {
       console.log(`[BrowserMCP] Tool success, sending result:`, response?.result);
-      send({
+      sendToPort(sourcePort, {
         type: "toolResult",
+        sessionId,
         callId,
         result: response?.result ?? null,
       });
     }
   } catch (error) {
     console.error(`[BrowserMCP] Tool call exception:`, error);
-    send({
+    sendToPort(sourcePort, {
       type: "toolResult",
+      sessionId,
       callId,
       result: null,
       error: error instanceof Error ? error.message : String(error),
@@ -265,12 +310,13 @@ async function handleCallTool(
 /**
  * Send tab focused message with discovered tools
  */
-async function sendTabFocused(tabId: number, requestId?: string): Promise<void> {
+async function sendTabFocused(sourcePort: number, tabId: number, requestId?: string, sessionId?: string): Promise<void> {
   const tab = await chrome.tabs.get(tabId);
   const tools = await discoverTools(tabId);
 
-  send({
+  sendToPort(sourcePort, {
     type: "tabFocused",
+    sessionId,
     tabId,
     tools,
     requestId,
@@ -320,10 +366,11 @@ async function discoverTools(tabId: number): Promise<Tool[]> {
   }
 }
 
-// Listen for tab events to keep MCP server in sync
+// Listen for tab events to keep MCP servers in sync
+// Broadcast to all connected servers
 chrome.tabs.onCreated.addListener((tab) => {
-  if (tab.id && ws?.readyState === WebSocket.OPEN) {
-    send({
+  if (tab.id && connections.size > 0) {
+    broadcast({
       type: "tabCreated",
       tab: {
         id: tab.id,
@@ -336,14 +383,14 @@ chrome.tabs.onCreated.addListener((tab) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  if (ws?.readyState === WebSocket.OPEN) {
-    send({ type: "tabClosed", tabId });
+  if (connections.size > 0) {
+    broadcast({ type: "tabClosed", tabId });
   }
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (ws?.readyState === WebSocket.OPEN && (changeInfo.title || changeInfo.url)) {
-    send({
+  if (connections.size > 0 && (changeInfo.title || changeInfo.url)) {
+    broadcast({
       type: "tabUpdated",
       tab: {
         id: tabId,
@@ -355,7 +402,8 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
 });
 
-// Start connection when service worker loads
-connect();
+// Start discovery and keepalive when service worker loads
+startDiscovery();
+startKeepalive();
 
-console.log("[BrowserMCP] Service worker started");
+console.log("[BrowserMCP] Service worker started - scanning for servers on ports", WS_PORT_START, "-", WS_PORT_END);
