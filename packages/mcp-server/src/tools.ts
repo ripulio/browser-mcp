@@ -1,3 +1,15 @@
+/**
+ * Tool Definitions - MCP Tool Schema
+ *
+ * This module defines the MCP tools exposed by the server. Currently there
+ * is a single "browser" tool that acts as a unified interface for all
+ * browser automation actions.
+ *
+ * The browser tool uses an "action" parameter to dispatch to different
+ * operations (connect, list_tabs, open_tab, close_tab) or to page-specific
+ * tools exposed by web pages through navigator.modelContext.
+ */
+
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
 
 export const browserTool: Tool = {

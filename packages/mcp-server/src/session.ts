@@ -1,3 +1,20 @@
+/**
+ * Session Management - Multi-Client Support
+ *
+ * This module provides session tracking for multiple concurrent MCP clients.
+ * Each Claude instance gets its own session with isolated pending operations,
+ * while sharing the same underlying browser state.
+ *
+ * Key features:
+ * - Session creation and lifecycle management
+ * - Per-session tracking of pending calls, tab operations, and connect requests
+ * - Automatic cleanup of inactive sessions (30-minute timeout)
+ * - Call ID generation with embedded session IDs for response routing
+ *
+ * This enables multiple Claude tabs to control the same browser simultaneously
+ * without interfering with each other's pending operations.
+ */
+
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { TabInfo } from "./types.js";
 
