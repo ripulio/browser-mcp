@@ -1,0 +1,24 @@
+{
+  "name": "@browser-mcp/server",
+  "version": "1.0.0",
+  "description": "MCP server that connects to Chrome and dynamically exposes per-tab tools",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "browser-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.7.2"
+  }
+}
