@@ -17,7 +17,9 @@
 
 import { ExtensionMessage, ServerMessage, TabInfo, Tool } from "./types.js";
 import { ExtensionMessageType, ServerMessageType } from "./message-types.js";
+import { discoverToolsScript, executeToolScript, toInjectedScript } from "./page-scripts.js";
 
+const LOG_PREFIX = "[BrowserMCP]";
 const WS_PORT_START = 8765;
 const WS_PORT_END = 8785;
 const KEEPALIVE_INTERVAL = 20 * 1000; // 20 seconds
@@ -39,7 +41,7 @@ function connectToPort(port: number): void {
   const ws = new WebSocket(`ws://localhost:${port}`);
 
   ws.onopen = () => {
-    console.log(`[BrowserMCP] Connected to MCP server on port ${port}`);
+    console.log(`${LOG_PREFIX} Connected to MCP server on port ${port}`);
     connections.set(port, ws);
   };
 
@@ -49,7 +51,7 @@ function connectToPort(port: number): void {
   };
 
   ws.onclose = () => {
-    console.log(`[BrowserMCP] Disconnected from MCP server on port ${port}`);
+    console.log(`${LOG_PREFIX} Disconnected from MCP server on port ${port}`);
     connections.delete(port);
   };
 
@@ -76,7 +78,7 @@ function discoverServers(): void {
 function sendToPort(port: number, message: ExtensionMessage): void {
   const ws = connections.get(port);
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    console.error(`[BrowserMCP] Cannot send to port ${port} - not connected`);
+    console.error(`${LOG_PREFIX} Cannot send to port ${port} - not connected`);
     return;
   }
   ws.send(JSON.stringify(message));
@@ -258,45 +260,24 @@ async function handleCallTool(
   args: Record<string, unknown>,
   sessionId?: string
 ): Promise<void> {
-  console.log(`[BrowserMCP] Calling tool "${toolName}" on tab ${tabId} with args:`, args);
+  console.log(`${LOG_PREFIX} Calling tool "${toolName}" on tab ${tabId} with args:`, args);
 
   try {
-    const code = `
-      (async () => {
-        const toolName = ${JSON.stringify(toolName)};
-        const toolArgs = ${JSON.stringify(args)};
+    const code = toInjectedScript(executeToolScript, toolName, args);
 
-        console.log('[BrowserMCP Page] Executing tool:', toolName, 'with args:', toolArgs);
-
-        if (!navigator.modelContext || !navigator.modelContext.executeTool) {
-          console.error('[BrowserMCP Page] navigator.modelContext not available');
-          return { error: "navigator.modelContext not available" };
-        }
-        try {
-          console.log('[BrowserMCP Page] Calling navigator.modelContext.executeTool...');
-          const result = await navigator.modelContext.executeTool(toolName, toolArgs);
-          console.log('[BrowserMCP Page] Tool result:', result);
-          return { result };
-        } catch (e) {
-          console.error('[BrowserMCP Page] Tool execution error:', e);
-          return { error: e instanceof Error ? e.message : String(e) };
-        }
-      })();
-    `;
-
-    console.log(`[BrowserMCP] Executing userScript on tab ${tabId}...`);
+    console.log(`${LOG_PREFIX} Executing userScript on tab ${tabId}...`);
     const results = await chrome.userScripts.execute({
       target: { tabId },
       world: "MAIN",
       js: [{ code }],
     });
-    console.log(`[BrowserMCP] userScript execution results:`, results);
+    console.log(`${LOG_PREFIX} userScript execution results:`, results);
 
     const response = results?.[0]?.result as { result?: unknown; error?: string } | undefined;
-    console.log(`[BrowserMCP] Parsed response:`, response);
+    console.log(`${LOG_PREFIX} Parsed response:`, response);
 
     if (response?.error) {
-      console.error(`[BrowserMCP] Tool error:`, response.error);
+      console.error(`${LOG_PREFIX} Tool error:`, response.error);
       sendToPort(sourcePort, {
         type: ExtensionMessageType.TOOL_RESULT,
         sessionId,
@@ -305,7 +286,7 @@ async function handleCallTool(
         error: response.error,
       });
     } else {
-      console.log(`[BrowserMCP] Tool success, sending result:`, response?.result);
+      console.log(`${LOG_PREFIX} Tool success, sending result:`, response?.result);
       sendToPort(sourcePort, {
         type: ExtensionMessageType.TOOL_RESULT,
         sessionId,
@@ -314,7 +295,7 @@ async function handleCallTool(
       });
     }
   } catch (error) {
-    console.error(`[BrowserMCP] Tool call exception:`, error);
+    console.error(`${LOG_PREFIX} Tool call exception:`, error);
     sendToPort(sourcePort, {
       type: ExtensionMessageType.TOOL_RESULT,
       sessionId,
@@ -359,14 +340,7 @@ async function discoverTools(tabId: number): Promise<Tool[]> {
       return [];
     }
 
-    const code = `
-      (() => {
-        if (!navigator.modelContext || !navigator.modelContext.list) {
-          return [];
-        }
-        return [...navigator.modelContext.list()];
-      })();
-    `;
+    const code = toInjectedScript(discoverToolsScript);
 
     const results = await chrome.userScripts.execute({
       target: { tabId },
@@ -424,4 +398,4 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 startDiscovery();
 startKeepalive();
 
-console.log("[BrowserMCP] Service worker started - scanning for servers on ports", WS_PORT_START, "-", WS_PORT_END);
+console.log(`${LOG_PREFIX} Service worker started - scanning for servers on ports`, WS_PORT_START, "-", WS_PORT_END);

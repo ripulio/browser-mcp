@@ -34,6 +34,7 @@ const DEFAULT_SESSION_ID = "default";
 
 export function rejectAllSessionPendingOps(session: Session, reason: string): void {
   for (const [, pending] of session.pendingCalls) {
+    clearTimeout(pending.timeout);
     pending.reject(new Error(reason));
   }
   session.pendingCalls.clear();
@@ -170,6 +171,7 @@ export function handleExtensionMessage(message: ExtensionMessage): void {
       if (session) {
         const pending = session.pendingCalls.get(message.callId);
         if (pending) {
+          clearTimeout(pending.timeout);
           session.pendingCalls.delete(message.callId);
           updateTabTools(message.tabId, message.tools);
           pending.resolve(message.tools);
@@ -184,6 +186,7 @@ export function handleExtensionMessage(message: ExtensionMessage): void {
       if (session) {
         const pending = session.pendingCalls.get(message.callId);
         if (pending) {
+          clearTimeout(pending.timeout);
           session.pendingCalls.delete(message.callId);
           if (message.error) {
             pending.reject(new Error(message.error));

@@ -21,6 +21,7 @@ import { TabInfo } from "./types.js";
 export interface PendingCall {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
 }
 
 export interface PendingOpenTabOperation {
@@ -56,6 +57,7 @@ export interface Session {
 const sessions = new Map<string, Session>();
 
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const CLEANUP_INTERVAL_MS = 60 * 1000; // 1 minute
 
 export function createSession(sessionId: string): Session {
   const session: Session = {
@@ -98,6 +100,7 @@ export function deleteSession(sessionId: string): void {
 
   // Reject all pending calls
   for (const [callId, pending] of session.pendingCalls) {
+    clearTimeout(pending.timeout);
     pending.reject(new Error("Session closed"));
   }
   session.pendingCalls.clear();
@@ -156,7 +159,7 @@ export function startSessionCleanup(): void {
     if (cleaned > 0) {
       console.error(`Cleaned up ${cleaned} inactive session(s)`);
     }
-  }, 60 * 1000); // Check every minute
+  }, CLEANUP_INTERVAL_MS);
 }
 
 export function stopSessionCleanup(): void {
