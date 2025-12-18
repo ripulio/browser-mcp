@@ -14,9 +14,8 @@ import { Tool } from "@modelcontextprotocol/sdk/types.js";
 
 export const browserTool: Tool = {
   name: "executeTool",
-  description: `Control the browser. Actions:
-- connect: Connect to browser extension (must be called first)
-- list_tabs: List all tabs with their available tools
+  description: `Control the browser and execute page tools. Actions:
+- list_tabs: List all open tabs with their available tools
 - open_tab: Open a new tab (params: url)
 - close_tab: Close a tab (params: tabId)
 - <tool_name>: Call a page-specific tool (params: tabId, plus tool-specific args)`,

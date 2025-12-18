@@ -9,7 +9,8 @@
  * The server:
  * - Starts a WebSocket server for the Chrome extension to connect to
  * - Handles MCP tool requests via stdio transport
- * - Routes browser actions: connect, list_tabs, open_tab, close_tab
+ * - Auto-connects to the extension on first action
+ * - Routes browser actions: list_tabs, open_tab, close_tab
  * - Proxies page-specific tool calls to web pages via navigator.modelContext
  *
  * Architecture:
@@ -35,6 +36,14 @@ import {
 } from "./extension-client.js";
 import { createSession, startSessionCleanup } from "./session.js";
 
+// Auto-connect to extension if not already connected
+async function ensureConnected(): Promise<void> {
+  const state = getState();
+  if (!state.connected) {
+    await connectToExtension(DEFAULT_SESSION_ID);
+  }
+}
+
 // Handle tools/call requests
 async function handleBrowserAction(
   action: string,
@@ -43,19 +52,8 @@ async function handleBrowserAction(
   const state = getState();
 
   switch (action) {
-    case "connect": {
-      const result = await connectToExtension(DEFAULT_SESSION_ID);
-      return {
-        connected: true,
-        browser: { name: result.name, version: result.version },
-        tabCount: result.tabCount,
-      };
-    }
-
     case "list_tabs": {
-      if (!state.connected) {
-        throw new Error("Not connected. Use action: 'connect' first.");
-      }
+      await ensureConnected();
       // Discover tools for all tabs in parallel
       const tabIds = Array.from(state.tabs.keys());
       await Promise.all(
@@ -77,9 +75,7 @@ async function handleBrowserAction(
     }
 
     case "open_tab": {
-      if (!state.connected) {
-        throw new Error("Not connected. Use action: 'connect' first.");
-      }
+      await ensureConnected();
       const url = params.url as string;
       if (!url) {
         throw new Error("url parameter is required for open_tab");
@@ -96,9 +92,7 @@ async function handleBrowserAction(
     }
 
     case "close_tab": {
-      if (!state.connected) {
-        throw new Error("Not connected. Use action: 'connect' first.");
-      }
+      await ensureConnected();
       const tabId = params.tabId as number;
       if (tabId === undefined) {
         throw new Error("tabId parameter is required for close_tab");
@@ -112,9 +106,7 @@ async function handleBrowserAction(
 
     default: {
       // Assume it's a page-specific tool
-      if (!state.connected) {
-        throw new Error("Not connected. Use action: 'connect' first.");
-      }
+      await ensureConnected();
       const tabId = params.tabId as number;
       if (tabId === undefined) {
         throw new Error("tabId parameter is required for page-specific tools");
