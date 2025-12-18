@@ -39,8 +39,7 @@ export type ExtensionMessage =
   | { type: typeof ExtensionMessageType.TOOL_RESULT; sessionId?: string; callId: string; result: unknown; error?: string }
   | { type: typeof ExtensionMessageType.TOOLS_DISCOVERED; sessionId?: string; callId: string; tabId: number; tools: Tool[] }
   | { type: typeof ExtensionMessageType.TAB_FOCUSED; sessionId?: string; tabId: number; tools: Tool[]; requestId?: string }
-  | { type: typeof ExtensionMessageType.PING }
-  | { type: typeof ExtensionMessageType.PONG };
+  | { type: typeof ExtensionMessageType.PING };
 
 // Messages from MCP server to extension
 export type ServerMessage =

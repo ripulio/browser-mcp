@@ -26,8 +26,8 @@
  * ============================================================================
  */
 
-// Import ambient types (compile-time only, not bundled)
-import "./page-context.js";
+// Reference ambient types (compile-time only, not emitted to JS)
+/// <reference path="./page-context.d.ts" />
 
 /**
  * Discovers available tools exposed by the page via navigator.modelContext.
