@@ -16,11 +16,74 @@
 
 import { TabInfo } from "./types.js";
 import { ServerMessageType } from "./message-types.js";
-import { getOrCreateSession, generateCallId } from "./session.js";
+import { getOrCreateSession, generateCallId, Session } from "./session.js";
 import { startServer as startWsServer, send, isSocketConnected, getActivePort as getWsActivePort } from "./ws-server.js";
+
+// Timeout values in milliseconds
+const TIMEOUTS = {
+  CONNECT: 5000,
+  OPEN_TAB: 30000,
+  CLOSE_TAB: 5000,
+  TOOL_CALL: 30000,
+  TOOL_DISCOVERY: 10000,
+} as const;
 
 // Default session ID for stdio transport (single client mode)
 export const DEFAULT_SESSION_ID = "default";
+
+// Generic pending operation type
+interface PendingOperation<T> {
+  resolve: (value: T) => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
+// Helper to check connection and throw if not connected
+function requireConnection(): void {
+  if (!isSocketConnected()) {
+    throw new Error("Not connected to browser");
+  }
+}
+
+// Low-level helper to create pending operations with timeout handling
+function createPendingOperation<T, K extends string | number>(
+  pendingMap: Map<K, PendingOperation<T>>,
+  key: K,
+  timeoutMs: number,
+  timeoutMessage: string,
+  sendMessage: () => void
+): Promise<T> {
+  requireConnection();
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pendingMap.delete(key);
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+
+    pendingMap.set(key, { resolve, reject, timeout });
+    sendMessage();
+  });
+}
+
+// Higher-level helper that handles session + callId generation
+function createCallOperation<T>(
+  sessionId: string,
+  prefix: string,
+  getPendingMap: (session: Session) => Map<string, PendingOperation<T>>,
+  timeoutMs: number,
+  timeoutMessage: string,
+  sendMessage: (callId: string) => void
+): Promise<T> {
+  const session = getOrCreateSession(sessionId);
+  const callId = generateCallId(session, prefix);
+  return createPendingOperation(
+    getPendingMap(session),
+    callId,
+    timeoutMs,
+    timeoutMessage,
+    () => sendMessage(callId)
+  );
+}
 
 // Re-export ws-server functions
 export const startServer = startWsServer;
@@ -52,7 +115,7 @@ export function connectToExtension(
       session.connectInProgress = false;
       session.pendingConnect = null;
       reject(new Error("Connection timeout - extension did not respond"));
-    }, 5000);
+    }, TIMEOUTS.CONNECT);
 
     session.pendingConnect = { resolve, reject, timeout };
 
@@ -60,105 +123,65 @@ export function connectToExtension(
   });
 }
 
-export async function openTab(
+export function openTab(
   url: string,
   sessionId: string = DEFAULT_SESSION_ID
 ): Promise<TabInfo> {
-  return new Promise((resolve, reject) => {
-    if (!isSocketConnected()) {
-      reject(new Error("Not connected to browser"));
-      return;
-    }
-
-    const session = getOrCreateSession(sessionId);
-    const requestId = generateCallId(session, "open");
-
-    const timeout = setTimeout(() => {
-      session.pendingOpenTabs.delete(requestId);
-      reject(new Error("Timeout waiting for tab to open"));
-    }, 30000);
-
-    session.pendingOpenTabs.set(requestId, { resolve, reject, timeout });
-
-    send({ type: ServerMessageType.OPEN_TAB, sessionId, url, focus: true, requestId });
-  });
+  return createCallOperation(
+    sessionId,
+    "open",
+    (s) => s.pendingOpenTabs,
+    TIMEOUTS.OPEN_TAB,
+    "Timeout waiting for tab to open",
+    (requestId) => send({ type: ServerMessageType.OPEN_TAB, sessionId, url, focus: true, requestId })
+  );
 }
 
-export async function closeTab(
+export function closeTab(
   tabId: number,
   sessionId: string = DEFAULT_SESSION_ID
 ): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (!isSocketConnected()) {
-      reject(new Error("Not connected to browser"));
-      return;
-    }
+  const session = getOrCreateSession(sessionId);
 
-    const session = getOrCreateSession(sessionId);
+  if (session.pendingCloseTabs.has(tabId)) {
+    return Promise.reject(new Error(`Already closing tab ${tabId}`));
+  }
 
-    if (session.pendingCloseTabs.has(tabId)) {
-      reject(new Error(`Already closing tab ${tabId}`));
-      return;
-    }
-
-    const timeout = setTimeout(() => {
-      session.pendingCloseTabs.delete(tabId);
-      reject(new Error("Timeout waiting for tab close"));
-    }, 5000);
-
-    session.pendingCloseTabs.set(tabId, { resolve, reject, timeout });
-    send({ type: ServerMessageType.CLOSE_TAB, sessionId, tabId });
-  });
+  return createPendingOperation(
+    session.pendingCloseTabs,
+    tabId,
+    TIMEOUTS.CLOSE_TAB,
+    "Timeout waiting for tab close",
+    () => send({ type: ServerMessageType.CLOSE_TAB, sessionId, tabId })
+  );
 }
 
-export async function callPageTool(
+export function callPageTool(
   tabId: number,
   toolName: string,
   args: Record<string, unknown>,
   sessionId: string = DEFAULT_SESSION_ID
 ): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    if (!isSocketConnected()) {
-      reject(new Error("Not connected to browser"));
-      return;
-    }
-
-    const session = getOrCreateSession(sessionId);
-    const callId = generateCallId(session, "call");
-    session.pendingCalls.set(callId, { resolve, reject });
-
-    send({ type: ServerMessageType.CALL_TOOL, sessionId, callId, tabId, toolName, args });
-
-    setTimeout(() => {
-      if (session.pendingCalls.has(callId)) {
-        session.pendingCalls.delete(callId);
-        reject(new Error("Timeout waiting for tool result"));
-      }
-    }, 30000);
-  });
+  return createCallOperation(
+    sessionId,
+    "call",
+    (s) => s.pendingCalls,
+    TIMEOUTS.TOOL_CALL,
+    "Timeout waiting for tool result",
+    (callId) => send({ type: ServerMessageType.CALL_TOOL, sessionId, callId, tabId, toolName, args })
+  );
 }
 
-export async function discoverToolsForTab(
+export function discoverToolsForTab(
   tabId: number,
   sessionId: string = DEFAULT_SESSION_ID
 ): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    if (!isSocketConnected()) {
-      reject(new Error("Not connected to browser"));
-      return;
-    }
-
-    const session = getOrCreateSession(sessionId);
-    const callId = generateCallId(session, "discover");
-    session.pendingCalls.set(callId, { resolve, reject });
-
-    send({ type: ServerMessageType.DISCOVER_TOOLS, sessionId, callId, tabId });
-
-    setTimeout(() => {
-      if (session.pendingCalls.has(callId)) {
-        session.pendingCalls.delete(callId);
-        reject(new Error("Timeout waiting for tool discovery"));
-      }
-    }, 10000);
-  });
+  return createCallOperation(
+    sessionId,
+    "discover",
+    (s) => s.pendingCalls,
+    TIMEOUTS.TOOL_DISCOVERY,
+    "Timeout waiting for tool discovery",
+    (callId) => send({ type: ServerMessageType.DISCOVER_TOOLS, sessionId, callId, tabId })
+  );
 }
