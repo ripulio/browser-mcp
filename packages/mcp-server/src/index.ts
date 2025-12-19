@@ -64,12 +64,16 @@ async function handleBrowserAction(
           })
         )
       );
-      // Return tabs with freshly discovered tools
+      // Return tabs with freshly discovered tools (including descriptions)
       const tabs = Array.from(state.tabs.values()).map((tab) => ({
         id: tab.id,
         title: tab.title,
         url: tab.url,
-        tools: tab.tools.map((t) => t.name),
+        tools: tab.tools.map((t) => ({
+          name: t.name,
+          description: t.description,
+          inputSchema: t.inputSchema,
+        })),
       }));
       return { tabs };
     }
@@ -86,7 +90,11 @@ async function handleBrowserAction(
           id: tab.id,
           title: tab.title,
           url: tab.url,
-          tools: tab.tools.map((t) => t.name),
+          tools: tab.tools.map((t) => ({
+            name: t.name,
+            description: t.description,
+            inputSchema: t.inputSchema,
+          })),
         },
       };
     }
