@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "browser-mcp",
-      "source": "../"
+      "source": "./"
     }
   ]
 }
