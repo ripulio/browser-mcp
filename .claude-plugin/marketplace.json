@@ -1,0 +1,13 @@
+{
+  "name": "browser-mcp",
+  "description": "MCP server for Chrome browser control",
+  "owner": {
+    "name": "ripulio"
+  },
+  "plugins": [
+    {
+      "name": "browser-mcp",
+      "source": "./"
+    }
+  ]
+}

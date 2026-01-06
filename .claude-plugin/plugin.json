@@ -1,0 +1,8 @@
+{
+  "name": "browser-mcp",
+  "version": "1.0.0",
+  "description": "An MCP server that lets Claude Code control Chrome browsers. Open tabs, interact with pages, and use page-specific tools exposed via navigator.modelContext.",
+  "author": {
+    "name": "ripulio"
+  }
+}
