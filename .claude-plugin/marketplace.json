@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "MCP server for Chrome browser control",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "repository": "https://github.com/ripulio/browser-mcp"
   },
   "plugins": [
@@ -14,7 +14,7 @@
       "name": "browser-mcp",
       "source": "./",
       "description": "An MCP server that lets Claude Code control Chrome browsers. Open tabs, interact with pages, and use page-specific tools exposed via navigator.modelContext.",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": {
         "name": "ripulio"
       },

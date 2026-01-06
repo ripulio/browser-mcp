@@ -1,6 +1,6 @@
 {
   "name": "@anthropic/browser-mcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "MCP server that connects to Chrome and dynamically exposes per-tab tools",
   "type": "module",
   "main": "dist/index.js",
