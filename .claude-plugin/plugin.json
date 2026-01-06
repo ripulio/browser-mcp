@@ -3,6 +3,12 @@
   "version": "1.0.0",
   "description": "An MCP server that lets Claude Code control Chrome browsers. Open tabs, interact with pages, and use page-specific tools exposed via navigator.modelContext.",
   "author": {
-    "name": "ripulio"
-  }
+    "name": "ripulio",
+    "url": "https://github.com/ripulio"
+  },
+  "homepage": "https://github.com/ripulio/browser-mcp",
+  "repository": "https://github.com/ripulio/browser-mcp",
+  "license": "MIT",
+  "keywords": ["browser", "chrome", "mcp", "automation", "tabs", "web"],
+  "mcpServers": "./.mcp.json"
 }
